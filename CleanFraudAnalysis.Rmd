@@ -1,0 +1,154 @@
+---
+title: "Fraud investigation"
+output: html_notebook
+---
+
+
+Read in functions 
+```{r}
+x_to_l<-function(x, lambda){
+  if(lambda==0)return(log(x))
+  return((x^lambda-1)/lambda)
+}
+
+boxcox.find.lambda<-function(data){
+  #data<-data-min(data)+1
+  l<-function(lambda, data) {
+    transformed =x_to_l(data, lambda)
+    return(-length(data)/2*log(mean((transformed -mean(transformed))^2)) +
+             (lambda-1)*sum(log(data)))
+  }
+  optimize(l, interval=c(-30,30), maximum = T, data=data)$maximum
+}
+
+scale.column<-function(col_data){
+  col_data<-col_data-min(col_data)+1
+  scale= mean(col_data)
+  col_data/scale
+}
+
+boxcox.it<-function(variable){
+  variable <-scale.column(variable)
+  lambda<-boxcox.find.lambda(variable)
+  return(list(scale.by=scale, add.to=min(variable)+1, Lambda=lambda, Transformed=x_to_l(variable, lambda)))
+}
+
+qqchi2<-function(distances){
+  distances<-sort(distances)
+  n<-length(distances)
+  x_ax<-qchisq((1:n)/n, 20)
+  y_ax<-distances
+  return(tibble(x=x_ax, y=y_ax))
+}
+
+```
+
+Read in data 
+```{r}
+require(tibble)
+require(ggplot2)
+data=readr::read_csv("fraud.csv", col_names = F)
+data<-scale(data)
+raw_dists<-mahalanobis(data, 0, cov = cov(data))
+
+bc_trans<-apply(data, 2, boxcox.it)
+lambdas<-sapply(bc_trans, FUN=function(x)x$Lambda)
+full_coxed<-sapply(bc_trans, FUN=function(x)x$Transformed)
+full_coxed<-scale(full_coxed)
+full_coxed_dists<-mahalanobis(full_coxed, 0, cov=cov(full_coxed))
+```
+
+
+Boxcox the non-outlier data (the fraudulent csv was provided by Josh)
+```{r}
+removed<-read.csv("fraudulent_250.csv", header=F)$V1
+non_fraud_data<-data[!removed,]
+non_fraud_data<-scale(non_fraud_data)
+bc.data<-apply(non_fraud_data, 2, boxcox.it)
+lambdas<-sapply(bc.data, FUN=function(x)x$Lambda)
+trans_data<-sapply(bc.data, FUN=function(x)x$Transformed)
+trans_data<-scale(trans_data)
+apply(trans_data,2,mean)
+apply(trans_data,2,var)
+
+non_fraud_raw_dists<-mahalanobis(non_fraud_data, center=0, cov=cov(non_fraud_data))
+non_fraud_coxed_dists<-mahalanobis(trans_data, center=0, cov=cov(trans_data))
+
+```
+Get lambda estimates for a multivariate box cox
+```{r}
+# require(car)
+# posified<-apply(non_fraud_data, 2, scale.column)
+# normalized=powerTransform(posified[sample(1:nrow(non_fraud_data), 8000, replace = F),])
+# 
+# mvn_coxed<-matrix(0, nrow=249750, ncol=20)
+# for (i in 1:20){
+#   mvn_coxed[,i]<-x_to_l(posified[,i], normalized$lambda[i])
+# }
+# mvn_coxed<-scale(mvn_coxed)
+# mvn_coxed_dists<-mahalanobis(mvn_coxed, 0, cov(mvn_coxed))
+```
+
+
+Calculate the Chi-squared QQ plots for all 4 datasets
+```{r}
+qq_full<-qqchi2(raw_dists)
+qq_full_coxed<-qqchi2(full_coxed_dists)
+qqdata_non<-qqchi2(non_fraud_raw_dists)
+qqdata_non_coxed<-qqchi2(non_fraud_coxed_dists)
+#qqdata_mvn_coxed<-qqchi2(mvn_coxed_dists)
+
+
+ggplot(data=NULL)+geom_abline(slope=1, intercept = 0)+geom_line(data=qq_full, aes(x=x, y=y, color="Full data untransformed"),size=2,alpha=.5)+
+  geom_line(data=qq_full_coxed, aes(x=x, y=y, color="Full data after Box-Cox"), size=2, alpha=.5)+
+  geom_line(data=qqdata_non, aes(x=x, y=y, color ="No outlier untransformed data"),size=2,alpha=.5)+
+  geom_line(data=qqdata_non_coxed, aes(x=x, y=y, color="No outlier after Box-Cox"),size=2,alpha=.5)+
+  #geom_line(data=qqdata_mvn_coxed, aes(x=x, y=y, color="Multivariate Box-Cox w/o outliers"),size=2,alpha=.5)+
+  xlab("Expected Distances")+ylab("Actual Distances")+ggtitle("QQ Chi-Squared Plot")+theme(text=element_text(size=20),
+                                                                                           legend.position = c(0.3, 0.75))
+ggsave("QQPlot.pdf", width = 10)
+```
+```{r}
+ggplot(data_frame(FirstPC=non_fraud_data[,1], SecondPC=non_fraud_data[,2]), aes(x=FirstPC, y=SecondPC))+geom_point(size=.1)+
+  ylab("Principle Component 2")+xlab("Principle Component 1")+theme(text=element_text(size=20))
+ggsave("NonLinearRel.jpg")
+```
+Make a plot showing right and left tail extreme values
+
+```{r}
+ggplot(data.frame(PC5=trans_data[,5]))+geom_histogram(aes(x=PC5))+
+  geom_vline(aes(xintercept=max(trans_data[,5]), color="Max value"))+
+  geom_vline(aes(xintercept=min(trans_data[,5]), color="Min value"))+theme(text=element_text(size=20),axis.text.y=element_blank(), axis.ticks.y=element_blank())
+  
+ggsave("ExtremeTails.pdf")
+```
+
+```{r}
+#require(car)
+#posified<-apply(non_fraud_data[,-21], 2, scale.column)
+#normalized=powerTransform(posified[1:10000,])
+```
+
+```{r}
+#coxed<-matrix(0, nrow=249750, ncol=20)
+#for (i in 1:20){
+ # coxed[,i]<-x_to_l(posified[,i], normalized$lambda[i])
+#}
+#coxed<-scale(coxed)
+```
+
+```{r}
+#coxeddists<-mahalanobis(coxed, center=0, cov=cov(coxed))
+#qqdata_non<-qqchi2(coxeddists)
+#ggplot(qqdata_non, aes(x=x, y=y))+geom_point()+geom_abline(slope=1, intercept = 0)+ylim(c(0,1000))
+```
+```{r}
+# require(MASS)
+# a=kde2d(coxed[,5], coxed[,12])
+# contour(a)
+#
+# b=mvtnorm::rmvnorm(100000, c(5,10), sigma = matrix(c(1,.8,.8,1), byrow = T, nrow=2))
+# d=kde2d(b[,1], b[,2])
+# contour(d)
+```
+
